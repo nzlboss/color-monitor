@@ -1,423 +1,366 @@
-# -*- coding: utf-8 -*-
-"""
-区域颜色变化监控 + 随机延迟 + 区域内随机位置多次点击 (Windows)
-------------------------------------------------------------------
-工作流程（每一步都有引导提醒）：
-  1. 设置监控区域        （拖动鼠标框选，或手动输入坐标）
-  2. 采样基准颜色指纹    （停留 3 秒后自动采样）
-  3. 设置点击区域        （同样可框选）
-  4. 设置点击次数        （整数）
-  5. 设置检测间隔 / 相似度阈值 / 延迟区间
-  6. 进入循环监控：
-      检测到变化 -> 随机延迟 3~5s -> 在点击区域内随机位置点击 N 次 -> 继续循环
-支持托盘热键：Ctrl+Alt+P 暂停/恢复，Ctrl+Alt+Q 退出。
-打包： pyinstaller --onefile --uac-admin --add-binary "xxx;." color_monitor.py
-"""
-
 import sys
 import os
+import json
 import time
 import random
-import json
-import ctypes
+import math
 import threading
-from datetime import datetime
+from io import BytesIO
 
-# ---------------- 依赖导入（友好提示） ----------------
-try:
-    import numpy as np
-except ImportError:
-    print("[错误] 缺少依赖 numpy，请先运行： pip install numpy")
-    sys.exit(1)
+import tkinter as tk
+from tkinter import ttk, messagebox
+from PIL import Image, ImageGrab, ImageTk
+import pyautogui
 
-try:
-    from PIL import ImageGrab, Image
-except ImportError:
-    print("[错误] 缺少依赖 pillow，请先运行： pip install pillow")
-    sys.exit(1)
+CONFIG_FILE = "monitor_config.json"
 
-try:
-    import pyautogui
-    pyautogui.FAILSAFE = False  # 禁用角落防误触，改为热键控制
-except ImportError:
-    print("[错误] 缺少依赖 pyautogui，请先运行： pip install pyautogui")
-    sys.exit(1)
+# ---------- 全局状态 ----------
+running = False
+paused = False
+exit_flag = False
 
-# ---------------- Windows 高精度休眠 ----------------
-if sys.platform == "win32":
-    time_begin = ctypes.windll.kernel32.timeBeginPeriod
-    time_end = ctypes.windll.kernel32.timeEndPeriod
-    try:
-        time_begin(1)
-    except Exception:
-        pass
+# ---------- 辅助函数 ----------
+def color_distance(c1, c2):
+    return math.sqrt(sum((a - b) ** 2 for a, b in zip(c1, c2)))
 
-# ---------------- 全局状态 ----------------
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "monitor_config.json")
-STATE = {
-    "watch_region": None,   # (x1, y1, x2, y2)
-    "click_region": None,   # (x1, y1, x2, y2)
-    "click_count": 5,
-    "check_interval": 0.5,   # 每次检测间隔(秒)
-    "threshold": 8.0,        # 颜色指纹差异阈值(0-255，越小越灵敏)
-    "delay_min": 3.0,
-    "delay_max": 5.0,
-    "click_interval": 0.05,  # 两次点击之间的间隔(秒)
-}
-RUNNING = True
-PAUSED = False
+def average_color(img, box):
+    """计算区域平均RGB"""
+    region = img.crop(box)
+    pixels = list(region.getdata())
+    if not pixels:
+        return (0, 0, 0)
+    r = sum(p[0] for p in pixels) // len(pixels)
+    g = sum(p[1] for p in pixels) // len(pixels)
+    b = sum(p[2] for p in pixels) // len(pixels)
+    return (r, g, b)
 
-
-# ---------------- 工具函数 ----------------
-def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-
-
-def input_int(prompt, default, minval=None, maxval=None):
-    while True:
-        try:
-            s = input(f"{prompt} [默认 {default}]: ").strip()
-            if s == "":
-                return default
-            v = int(s)
-            if (minval is not None and v < minval) or (maxval is not None and v > maxval):
-                print(f"  请输入介于 {minval} 和 {maxval} 之间的整数。")
-                continue
-            return v
-        except ValueError:
-            print("  请输入有效的整数。")
-
-
-def input_float(prompt, default, minval=None, maxval=None):
-    while True:
-        try:
-            s = input(f"{prompt} [默认 {default}]: ").strip()
-            if s == "":
-                return default
-            v = float(s)
-            if (minval is not None and v < minval) or (maxval is not None and v > maxval):
-                print(f"  请输入介于 {minval} 和 {maxval} 之间的数值。")
-                continue
-            return v
-        except ValueError:
-            print("  请输入有效的数值。")
-
-
-# ---------------- 区域设置（支持拖动框选） ----------------
-def grab_region(region):
-    """抓取区域为 numpy 数组 (H, W, 3)"""
-    x1, y1, x2, y2 = region
-    bbox = (x1, y1, x2, y2)
-    img = ImageGrab.grab(bbox=bbox, all_screens=True)
-    return np.array(img)
-
-
-def color_fingerprint(region):
-    """计算区域颜色指纹：缩小到 16x16 后的平均色调 + 整体均值，作为稳定特征"""
-    x1, y1, x2, y2 = region
-    img = ImageGrab.grab(bbox=(x1, y1, x2, y2), all_screens=True).convert("RGB")
-    small = img.resize((16, 16), Image.NEAREST)
-    arr = np.array(small, dtype=np.float32)
-    mean_color = arr.mean(axis=(0, 1))           # (3,) 整体均值
-    # 用网格分块均值增加空间敏感度
-    grid = arr.reshape(4, 4, 4, 4, 3).mean(axis=(1, 3)).reshape(-1, 3)
-    return mean_color, grid
-
-
-def fingerprint_diff(fp1, fp2):
-    mean1, grid1 = fp1
-    mean2, grid2 = fp2
-    d_mean = np.abs(mean1 - mean2).mean()
-    d_grid = np.abs(grid1 - grid2).mean()
-    return float(d_mean + d_grid)
-
-
-def select_region_interactive(name):
-    """通过拖动鼠标框选区域；失败则退回手动输入"""
-    print(f"\n>>> 接下来设置【{name}】")
-    print("    方式1：在接下来的 10 秒内，按住鼠标左键拖动一个矩形框后松开")
-    print("    方式2：直接回车跳过，改用手动输入坐标")
-    try:
-        from pynput.mouse import Button, Listener
-    except ImportError:
-        print("    [提示] 未安装 pynput，将使用手动输入方式。建议 pip install pynput")
-        return _manual_region(name)
-
-    state = {"start": None, "end": None, "done": False}
-
-    def on_click(x, y, button, pressed):
-        if button != Button.left:
-            return
-        if pressed:
-            state["start"] = (x, y)
-            state["end"] = None
-        else:
-            state["end"] = (x, y)
-            state["done"] = True
-            return False  # 停止监听
-
-    listener = Listener(on_click=on_click)
-    listener.start()
-    for _ in range(100):  # 最长等待 10 秒
-        if state["done"]:
-            break
-        time.sleep(0.1)
-    listener.stop()
-    if state["start"] and state["end"]:
-        x1, y1 = map(int, state["start"])
-        x2, y2 = map(int, state["end"])
-        x1, x2 = sorted((x1, x2))
-        y1, y2 = sorted((y1, y2))
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            print("    框选区域过小，改用手动输入。")
-            return _manual_region(name)
-        print(f"    [已框选] {name}: ({x1}, {y1}) -> ({x2}, {y2})")
-        return (x1, y1, x2, y2)
-    return _manual_region(name)
-
-
-def _manual_region(name):
-    print(f"    请手动输入 {name} 的左上角和右下角坐标：")
-    try:
-        x1 = int(input("      x1 (左): "))
-        y1 = int(input("      y1 (上): "))
-        x2 = int(input("      x2 (右): "))
-        y2 = int(input("      y2 (下): "))
-    except ValueError:
-        print("    输入无效，返回 None")
-        return None
-    x1, x2 = sorted((x1, x2))
-    y1, y2 = sorted((y1, y2))
-    return (x1, y1, x2, y2)
-
-
-# ---------------- 配置保存/加载 ----------------
-def save_config():
-    try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(STATE, f, ensure_ascii=False, indent=2)
-        log(f"配置已保存到 {CONFIG_PATH}")
-    except Exception as e:
-        log(f"保存配置失败：{e}")
-
-
-def load_config():
-    global STATE
-    if not os.path.exists(CONFIG_PATH):
-        return False
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            saved = json.load(f)
-        # JSON 会把 tuple 变成 list，还原坐标为元组
-        for key in ("watch_region", "click_region"):
-            if key in saved and isinstance(saved[key], list):
-                saved[key] = tuple(saved[key])
-        STATE.update(saved)
-        log(f"已加载已有配置：{CONFIG_PATH}")
-        return True
-    except Exception as e:
-        log(f"加载配置失败，使用默认：{e}")
-        return False
-
-
-# ---------------- 监控循环 ----------------
-def do_clicks(region, count):
-    """在区域内随机位置连续点击"""
-    x1, y1, x2, y2 = region
-    for i in range(count):
-        rx = random.randint(x1 + 1, max(x1 + 2, x2 - 1))
-        ry = random.randint(y1 + 1, max(y1 + 2, y2 - 1))
-        # 加一点随机抖动，更像人工
-        pyautogui.moveTo(rx, ry, duration=random.uniform(0.02, 0.08))
-        pyautogui.click(rx, ry)
-        log(f"  点击 #{i + 1}/{count} -> ({rx}, {ry})")
-        time.sleep(STATE["click_interval"] + random.uniform(0, 0.03))
-
-
-def monitor_loop():
-    global RUNNING, PAUSED
-    log("=" * 50)
-    log("开始监控循环。检测到变化后将：随机延迟 -> 随机位置点击 N 次 -> 继续循环")
-    log("热键：Ctrl+Alt+P 暂停/恢复 | Ctrl+Alt+Q 退出")
-    log("=" * 50)
-
-    baseline = color_fingerprint(STATE["watch_region"])
-    log(f"基准颜色指纹已采样（阈值={STATE['threshold']}）")
-
-    while RUNNING:
-        if PAUSED:
-            time.sleep(0.3)
-            continue
-
-        try:
-            current = color_fingerprint(STATE["watch_region"])
-            diff = fingerprint_diff(baseline, current)
-        except Exception as e:
-            log(f"抓取画面失败：{e}")
-            time.sleep(STATE["check_interval"])
-            continue
-
-        if diff > STATE["threshold"]:
-            delay = random.uniform(STATE["delay_min"], STATE["delay_max"])
-            log(f"*** 检测到颜色变化！差异={diff:.2f} > {STATE['threshold']}  |  延迟 {delay:.2f} 秒 ***")
-            # 延迟期间仍响应暂停/退出
-            slept = 0
-            while slept < delay and RUNNING:
-                time.sleep(0.1)
-                slept += 0.1
-            if not RUNNING:
-                break
-            if PAUSED:
-                log("当前处于暂停状态，等待恢复...")
-                while PAUSED and RUNNING:
-                    time.sleep(0.3)
+def multi_sample_color(img, box, grid=(4, 4)):
+    """多点采样平均"""
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    sw, sh = w // grid[0], h // grid[1]
+    samples = []
+    for gx in range(grid[0]):
+        for gy in range(grid[1]):
+            sx = x1 + gx * sw + sw // 2
+            sy = y1 + gy * sh + sh // 2
             try:
-                do_clicks(STATE["click_region"], STATE["click_count"])
-            except Exception as e:
-                log(f"点击执行失败：{e}")
-            log("本轮动作完成，重置基准指纹，继续监控...")
-            try:
-                baseline = color_fingerprint(STATE["watch_region"])
+                samples.append(img.getpixel((sx, sy)))
             except Exception:
                 pass
+    if not samples:
+        return (0, 0, 0)
+    r = sum(p[0] for p in samples) // len(samples)
+    g = sum(p[1] for p in samples) // len(samples)
+    b = sum(p[2] for p in samples) // len(samples)
+    return (r, g, b)
 
-        time.sleep(STATE["check_interval"])
-
-
-# ---------------- 热键监听 ----------------
-def hotkey_listener():
-    global RUNNING, PAUSED
-    try:
-        from pynput.keyboard import GlobalHotKeys
-        bindings = {
-            "<ctrl>+<alt>+p": toggle_pause,
-            "<ctrl>+<alt>+q": quit_program,
-        }
-        with GlobalHotKeys(bindings) as h:
-            h.join()
-    except Exception as e:
-        log(f"热键监听初始化失败（可忽略，不影响主功能）：{e}")
-
-
-def toggle_pause():
-    global PAUSED
-    PAUSED = not PAUSED
-    log(">>> 已" + ("暂停" if PAUSED else "恢复") + "监控 <<<")
-
-
-def quit_program():
-    global RUNNING
-    RUNNING = False
-    log(">>> 收到退出信号，正在退出... <<<")
-
-
-# ---------------- 引导配置 ----------------
-def guided_setup():
-    print("\n" + "=" * 50)
-    print("  区域颜色监控 - 引导配置向导")
-    print("=" * 50)
-
-    # 1. 监控区域
-    print("\n【步骤 1/6】设置监控区域（检测颜色变化的地方）")
-    if STATE["watch_region"]:
-        print(f"  当前监控区域：{STATE['watch_region']}")
-        if input("  重新设置？(y/N): ").strip().lower() == "y":
-            STATE["watch_region"] = select_region_interactive("监控区域")
-    else:
-        STATE["watch_region"] = select_region_interactive("监控区域")
-
-    # 2. 采样基准
-    print("\n【步骤 2/6】采样基准颜色")
-    print("  保持监控区域为你想要的'原始状态'，脚本将在 3 秒后自动采样")
-    if STATE["watch_region"]:
-        for i in range(3, 0, -1):
-            print(f"  ... {i}")
-            time.sleep(1)
-        try:
-            color_fingerprint(STATE["watch_region"])
-            print("  [OK] 基准采样成功")
-        except Exception as e:
-            print(f"  [失败] {e}")
-
-    # 3. 点击区域
-    print("\n【步骤 3/6】设置点击区域（变化后在哪里点击）")
-    if STATE["click_region"]:
-        print(f"  当前点击区域：{STATE['click_region']}")
-        if input("  重新设置？(y/N): ").strip().lower() == "y":
-            STATE["click_region"] = select_region_interactive("点击区域")
-    else:
-        STATE["click_region"] = select_region_interactive("点击区域")
-
-    # 4. 点击次数
-    print("\n【步骤 4/6】设置点击次数")
-    STATE["click_count"] = input_int("  每次触发后点击多少次", STATE["click_count"], 1, 1000)
-
-    # 5. 延迟区间
-    print("\n【步骤 5/6】设置触发后的随机延迟区间(秒)")
-    STATE["delay_min"] = input_float("  最短延迟(秒)", STATE["delay_min"], 0.0, 60.0)
-    STATE["delay_max"] = input_float("  最长延迟(秒)", STATE["delay_max"], STATE["delay_min"], 60.0)
-
-    # 6. 高级参数
-    print("\n【步骤 6/6】高级参数")
-    STATE["check_interval"] = input_float("  检测间隔(秒, 越小越灵敏越占CPU)", STATE["check_interval"], 0.05, 10.0)
-    STATE["threshold"] = input_float("  颜色差异阈值(0-255, 越小越灵敏)", STATE["threshold"], 0.5, 100.0)
-
-    save_config()
-
-    # 校验
-    if not STATE["watch_region"] or not STATE["click_region"]:
-        print("\n[警告] 监控区域和点击区域都必须设置完整才能运行！")
-        return False
-    return True
-
-
-# ---------------- 主程序 ----------------
-def main():
-    global RUNNING
-    print("\n" + "*" * 50)
-    print("   区域颜色变化监控工具  v1.0")
-    print("   Windows 专用 | 检测到变化 -> 随机延迟 -> 随机点击")
-    print("*" * 50)
-
-    load_config()
-
-    while True:
-        print("\n请选择操作：")
-        print("  [1] 重新引导配置（向导模式）")
-        print("  [2] 使用当前配置直接开始监控")
-        print("  [3] 查看当前配置")
-        print("  [4] 退出")
-        choice = input("输入选项 [1]: ").strip() or "1"
-
-        if choice == "1":
-            if not guided_setup():
-                continue
-            break
-        elif choice == "2":
-            if not STATE["watch_region"] or not STATE["click_region"]:
-                print("配置不完整，请先执行引导配置(1)。")
-                continue
-            break
-        elif choice == "3":
-            print(json.dumps(STATE, ensure_ascii=False, indent=2))
-        elif choice == "4":
+# ---------- 截图选择器 ----------
+class ScreenshotSelector:
+    def __init__(self, title="选择区域"):
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.attributes("-topmost", True)
+        self.result = None
+        self.selection_type = None  # 'click' or 'drag'
+        
+        # 截全屏
+        self.full_screenshot = ImageGrab.grab()
+        self.scale_factor = 1.0
+        
+        # 适应屏幕
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        img_w, img_h = self.full_screenshot.size
+        
+        # 缩放以适应屏幕
+        scale = min(screen_w * 0.95 / img_w, screen_h * 0.85 / img_h, 1.0)
+        self.scale_factor = scale
+        display_w, display_h = int(img_w * scale), int(img_h * scale)
+        
+        resized_img = self.full_screenshot.resize((display_w, display_h), Image.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized_img)
+        
+        # Canvas
+        self.canvas = tk.Canvas(self.root, width=display_w, height=display_h, cursor="cross")
+        self.canvas.pack()
+        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
+        
+        # 绑定事件
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_motion)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        
+        self.start_x = None
+        self.start_y = None
+        self.rect_id = None
+        
+        # 底部按钮
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(pady=5)
+        tk.Label(btn_frame, text="拖框选区域 / 单击选点").pack(side="left", padx=10)
+        tk.Button(btn_frame, text="确定", command=self.confirm).pack(side="right", padx=5)
+        tk.Button(btn_frame, text="取消", command=self.cancel).pack(side="right", padx=5)
+        
+        self.confirmed = False
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.root.mainloop()
+    
+    def on_press(self, event):
+        self.start_x = event.x
+        self.start_y = event.y
+        self.press_time = time.time()
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+            self.rect_id = None
+    
+    def on_motion(self, event):
+        if self.start_x is None:
             return
+        if self.rect_id:
+            self.canvas.delete(self.rect_id)
+        self.rect_id = self.canvas.create_rectangle(
+            self.start_x, self.start_y, event.x, event.y,
+            outline="red", width=2
+        )
+    
+    def on_release(self, event):
+        elapsed = time.time() - self.press_time
+        if elapsed < 0.35:
+            # 单击
+            sx = int(event.x / self.scale_factor)
+            sy = int(event.y / self.scale_factor)
+            self.result = (sx, sy)
+            self.selection_type = "click"
         else:
-            print("无效选项。")
+            # 拖框
+            x1 = int(min(self.start_x, event.x) / self.scale_factor)
+            y1 = int(min(self.start_y, event.y) / self.scale_factor)
+            x2 = int(max(self.start_x, event.x) / self.scale_factor)
+            y2 = int(max(self.start_y, event.y) / self.scale_factor)
+            if abs(x2 - x1) > 5 and abs(y2 - y1) > 5:
+                self.result = (x1, y1, x2, y2)
+                self.selection_type = "drag"
+            else:
+                self.result = None
+                self.selection_type = None
+    
+    def confirm(self):
+        if self.result is None:
+            messagebox.showwarning("提示", "请先拖框或单击选择区域")
+            return
+        self.confirmed = True
+        self.root.destroy()
+    
+    def cancel(self):
+        self.result = None
+        self.confirmed = False
+        self.root.destroy()
 
-    # 启动热键监听线程
-    t = threading.Thread(target=hotkey_listener, daemon=True)
-    t.start()
+# ---------- 颜色采样器（取目标色） ----------
+class ColorSampler:
+    def __init__(self, screenshot, prompt="请让按钮变成【可点击色】，然后单击它"):
+        self.root = tk.Tk()
+        self.root.title("取色")
+        self.root.attributes("-topmost", True)
+        self.result = None
+        
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        img_w, img_h = screenshot.size
+        
+        scale = min(screen_w * 0.75 / img_w, screen_h * 0.65 / img_h, 1.0)
+        self.scale_factor = scale
+        display_w, display_h = int(img_w * scale), int(img_h * scale)
+        
+        resized_img = screenshot.resize((display_w, display_h), Image.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized_img)
+        
+        self.canvas = tk.Canvas(self.root, width=display_w, height=display_h, cursor="cross")
+        self.canvas.pack()
+        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
+        
+        self.canvas.bind("<Button-1>", self.on_click)
+        
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(pady=5)
+        tk.Label(btn_frame, text=prompt, fg="blue").pack(side="left", padx=10)
+        tk.Button(btn_frame, text="确定", command=self.confirm).pack(side="right", padx=5)
+        tk.Button(btn_frame, text="取消", command=self.cancel).pack(side="right", padx=5)
+        
+        self.confirmed = False
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.root.mainloop()
+    
+    def on_click(self, event):
+        x = int(event.x / self.scale_factor)
+        y = int(event.y / self.scale_factor)
+        self.result = (x, y)
+        self.canvas.delete("marker")
+        r = 5
+        self.canvas.create_oval(event.x-r, event.y-r, event.x+r, event.y+r,
+                                outline="red", width=2, tags="marker")
+    
+    def confirm(self):
+        if self.result is None:
+            messagebox.showwarning("提示", "请先在图片上单击取色")
+            return
+        self.confirmed = True
+        self.root.destroy()
+    
+    def cancel(self):
+        self.result = None
+        self.confirmed = False
+        self.root.destroy()
 
+# ---------- 主程序 ----------
+def main():
+    global running, paused, exit_flag
+    
+    print("=" * 50)
+    print("ColorMonitor V3 - 目标色检测版")
+    print("=" * 50)
+    
+    # 加载已有配置
+    config = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            print(f"[配置] 已加载 {CONFIG_FILE}")
+        except Exception:
+            pass
+    
+    # 截图
+    print("\n[步骤 1/4] 正在截图...")
+    screenshot = ImageGrab.grab()
+    
+    # 1. 选择监控区域
+    print("[步骤 1/4] 请框选【监控区域】（按钮颜色变化的区域）")
+    selector = ScreenshotSelector("选择监控区域")
+    if not selector.confirmed or selector.result is None:
+        print("[退出] 用户取消")
+        return
+    monitor_box = selector.result
+    print(f"  监控区域: {monitor_box}")
+    
+    # 2. 取目标色
+    print("\n[步骤 2/4] 请让按钮变成【可点击色】，然后在截图上单击取色")
+    sampler = ColorSampler(screenshot, "请让按钮变成【可点击色】，然后单击它")
+    if not sampler.confirmed or sampler.result is None:
+        print("[退出] 用户取消")
+        return
+    click_x, click_y = sampler.result
+    target_color = screenshot.getpixel((click_x, click_y))
+    print(f"  目标色: RGB{target_color}  @ ({click_x}, {click_y})")
+    
+    # 3. 选择点击区域
+    print("\n[步骤 3/4] 请框选/单击【点击区域】")
+    selector2 = ScreenshotSelector("选择点击区域")
+    if not selector2.confirmed or selector2.result is None:
+        print("[退出] 用户取消")
+        return
+    click_area = selector2.result
+    print(f"  点击区域: {click_area}")
+    
+    # 4. 参数设置
+    print("\n[步骤 4/4] 参数设置（直接回车使用默认值）")
     try:
-        monitor_loop()
+        delay_min = float(input("  最小延迟(秒) [3]: ") or "3")
+        delay_max = float(input("  最大延迟(秒) [10]: ") or "10")
+        click_count = int(input("  点击次数 [1]: ") or "1")
+        tolerance = int(input("  颜色容差 [18]: ") or "18")
+        interval = float(input("  检测间隔(秒) [0.3]: ") or "0.3")
+    except Exception:
+        print("[错误] 参数无效，使用默认值")
+        delay_min, delay_max = 3, 10
+        click_count = 1
+        tolerance = 18
+        interval = 0.3
+    
+    # 保存配置
+    config = {
+        "monitor_box": list(monitor_box) if isinstance(monitor_box, tuple) else list(monitor_box),
+        "target_color": list(target_color),
+        "click_area": list(click_area) if isinstance(click_area, tuple) else list(click_area),
+        "delay_min": delay_min,
+        "delay_max": delay_max,
+        "click_count": click_count,
+        "tolerance": tolerance,
+        "interval": interval
+    }
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    print(f"\n[配置] 已保存至 {CONFIG_FILE}")
+    
+    # 开始监控
+    print("\n" + "=" * 60)
+    print("开始监控！")
+    print("  Ctrl+Alt+P = 暂停/恢复")
+    print("  Ctrl+Alt+Q = 退出")
+    print("=" * 60)
+    
+    running = True
+    last_check_color = None
+    
+    try:
+        while not exit_flag:
+            if paused:
+                time.sleep(0.5)
+                continue
+            
+            # 截取监控区域
+            region_img = ImageGrab.grab(bbox=monitor_box)
+            current_color = multi_sample_color(region_img, (0, 0, region_img.width, region_img.height))
+            
+            dist = color_distance(current_color, target_color)
+            
+            if dist < tolerance:
+                print(f"[触发] 颜色匹配! 距离={dist:.1f} / 容差={tolerance}")
+                
+                # 随机延迟
+                delay = random.uniform(delay_min, delay_max)
+                print(f"  等待 {delay:.1f} 秒...")
+                time.sleep(delay)
+                
+                # 二次确认
+                region_img2 = ImageGrab.grab(bbox=monitor_box)
+                current_color2 = multi_sample_color(region_img2, (0, 0, region_img2.width, region_img2.height))
+                dist2 = color_distance(current_color2, target_color)
+                
+                if dist2 < tolerance:
+                    print(f"  二次确认通过 (距离={dist2:.1f})，准备点击")
+                    
+                    # 执行点击
+                    if isinstance(click_area, tuple) and len(click_area) == 4:
+                        # 拖框区域 → 随机点击
+                        x1, y1, x2, y2 = click_area
+                        for i in range(click_count):
+                            cx = random.randint(x1, x2)
+                            cy = random.randint(y1, y2)
+                            pyautogui.click(cx, cy)
+                            time.sleep(random.uniform(0.05, 0.15))
+                            print(f"  点击 #{i+1}: ({cx}, {cy})")
+                    else:
+                        # 单击点 → 点附近
+                        cx, cy = click_area
+                        for i in range(click_count):
+                            ox = random.randint(-5, 5)
+                            oy = random.randint(-5, 5)
+                            pyautogui.click(cx + ox, cy + oy)
+                            time.sleep(random.uniform(0.05, 0.15))
+                            print(f"  点击 #{i+1}: ({cx+ox}, {cy+oy})")
+                else:
+                    print(f"  二次确认未通过 (距离={dist2:.1f})，跳过此次")
+            
+            time.sleep(interval)
+    
     except KeyboardInterrupt:
-        log("收到 Ctrl+C，退出。")
+        print("\n[退出] 用户中断")
+    except Exception as e:
+        print(f"\n[错误] {e}")
     finally:
-        RUNNING = False
-        save_config()
-        log("程序结束。")
-
+        print("程序已停止")
 
 if __name__ == "__main__":
     main()
