@@ -26,14 +26,25 @@ jobs:
           Write-Host "Tesseract 通常由最终用户在本机安装，此处仅做环境提示"
           Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object Source
 
+      - name: Prepare icon
+        # 优先使用仓库内的 boxbot.ico；没有则用程序运行时自动生成（兼容无图标构建）
+        run: |
+          if (Test-Path "boxbot.ico") {
+            Write-Host "使用仓库内 boxbot.ico"
+          } else {
+            Write-Host "未找到 boxbot.ico，运行时将自动生成简易图标"
+          }
+
       - name: Build EXE
         run: |
-          pyinstaller --onefile --console --uac-admin --name ColorMonitor color_monitor.py
+          $icon = ""
+          if (Test-Path "boxbot.ico") { $icon = "--icon boxbot.ico" }
+          pyinstaller --onefile --console --uac-admin --name "嘉年华箱子助手_BoxBot" $icon color_monitor.py
           dir dist
 
       - name: Upload EXE
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ColorMonitor-EXE
-          path: dist/ColorMonitor.exe
+          name: 嘉年华箱子助手_BoxBot
+          path: dist/嘉年华箱子助手_BoxBot.exe
