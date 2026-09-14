@@ -14,17 +14,25 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Check Tesseract availability
+        run: |
+          Write-Host "Tesseract 通常由最终用户在本机安装，此处仅做环境提示"
+          Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object Source
 
       - name: Build EXE
         run: |
           pyinstaller --onefile --console --uac-admin --name ColorMonitor color_monitor.py
+          dir dist
 
       - name: Upload EXE
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ColorMonitor-EXE
