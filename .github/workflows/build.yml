@@ -24,7 +24,7 @@ jobs:
           
       - name: Build EXE
         run: |
-          pyinstaller --onefile --console --uac-admin --name "嘉年华箱子助手_BoxBot" color_monitor.py
+          pyinstaller --onefile --console --uac-admin --icon boxbot.ico --name "嘉年华箱子助手_BoxBot" color_monitor.py
           
       - name: Upload EXE
         uses: actions/upload-artifact@v4
