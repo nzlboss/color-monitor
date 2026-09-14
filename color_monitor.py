@@ -18,7 +18,7 @@ import pyautogui
 # 全局配置
 # ============================================================
 CONFIG_FILE = "boxbot_config.json"
-NOTICE_URL = "http://res.7ml.cn/ad/ad-top.txt"  # ← 改成你的链接
+NOTICE_URL = "http://res.7ml.cn/ad/notice.txt"
 APP_NAME = "嘉年华箱子助手"
 APP_VERSION = "v6.0"
 BOT_NAME = "BoxBot"
@@ -37,13 +37,12 @@ def strip_digits(text):
     return re.sub(r'[\d:]', '', text).strip()
 
 def clean_ocr_text(text):
-    """清理 OCR 结果：去空格换行符号"""
+    """清理 OCR 结果"""
     text = text.replace(' ', '').replace('\n', '').replace('\r', '').strip()
     text = re.sub(r'[^\u4e00-\u9fff\w]', '', text)
     return text
 
 def get_timestamp():
-    """获取当前时间字符串"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def get_notice():
@@ -59,7 +58,7 @@ def get_notice():
     return "框选一次按钮 · 自动识别限时领取 · 循环点击"
 
 def generate_icon():
-    """生成一个简单的宝箱图标（256x256）"""
+    """生成一个简单的宝箱图标"""
     img = Image.new('RGBA', (256, 256), (0, 255, 120, 180))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([20, 80, 236, 220], radius=30, fill=(139, 69, 19, 240))
@@ -69,7 +68,7 @@ def generate_icon():
     return img
 
 # ============================================================
-# 截图选择器
+# 截图选择器（按钮在右侧）
 # ============================================================
 
 class ScreenshotSelector:
@@ -92,20 +91,50 @@ class ScreenshotSelector:
         screen_h = self.root.winfo_screenheight()
         img_w, img_h = self.full_screenshot.size
         
-        scale = min(screen_w * 0.93 / img_w, screen_h * 0.88 / img_h, 1.0)
+        scale = min(screen_w * 0.83 / img_w, screen_h * 0.88 / img_h, 1.0)
         self.scale_factor = scale
         display_w, display_h = int(img_w * scale), int(img_h * scale)
         
         resized_img = self.full_screenshot.resize((display_w, display_h), Image.LANCZOS)
         self.tk_img = ImageTk.PhotoImage(resized_img)
         
-        self.canvas = tk.Canvas(self.root, width=display_w, height=display_h, cursor="cross")
+        # 主容器：左右布局
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill="both", expand=True)
+        
+        # 左侧：Canvas
+        left_frame = tk.Frame(main_frame)
+        left_frame.pack(side="left", fill="both", expand=True)
+        
+        self.canvas = tk.Canvas(left_frame, width=display_w, height=display_h, cursor="cross")
         self.canvas.pack()
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
         
-        self.status_label = tk.Label(self.root, text="请框选按钮区域，然后点击「确认」", fg="blue", font=("微软雅黑", 12))
-        self.status_label.pack(pady=2)
+        # 右侧：按钮区（垂直居中）
+        right_frame = tk.Frame(main_frame, width=100)
+        right_frame.pack(side="right", fill="y", padx=(5, 10))
+        right_frame.pack_propagate(False)
         
+        # 垂直居中容器
+        center_frame = tk.Frame(right_frame)
+        center_frame.place(relx=0.5, rely=0.45, anchor="center")
+        
+        btn_confirm = tk.Button(center_frame, text="确认", command=self.confirm,
+                                bg="#4CAF50", fg="white", font=("微软雅黑", 12),
+                                width=8, height=2)
+        btn_confirm.pack(pady=(0, 15))
+        
+        btn_cancel = tk.Button(center_frame, text="取消", command=self.cancel,
+                               bg="#f44336", fg="white", font=("微软雅黑", 12),
+                               width=8, height=2)
+        btn_cancel.pack()
+        
+        # 底部状态栏
+        self.status_label = tk.Label(self.root, text="请框选按钮区域，然后点击「确认」",
+                                     fg="blue", font=("微软雅黑", 10))
+        self.status_label.pack(pady=(2, 5))
+        
+        # 绑定事件
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_motion)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
@@ -114,11 +143,6 @@ class ScreenshotSelector:
         self.start_y = None
         self.rect_id = None
         self.press_time = None
-        
-        btn_frame = tk.Frame(self.root)
-        btn_frame.pack(pady=3)
-        tk.Button(btn_frame, text="确认", command=self.confirm, bg="#4CAF50", fg="white", font=("微软雅黑", 10)).pack(side="left", padx=10)
-        tk.Button(btn_frame, text="取消", command=self.cancel, bg="#f44336", fg="white", font=("微软雅黑", 10)).pack(side="left", padx=10)
         
         self.confirmed = False
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -184,10 +208,10 @@ def main():
     
     notice = get_notice()
     
-    print("=" * 52)
+    print("=" * 56)
     print(f"  {APP_NAME}  {BOT_NAME}  {APP_VERSION}")
     print(f"  {notice}")
-    print("=" * 52)
+    print("=" * 56)
     print()
     
     # 加载已有配置
@@ -199,16 +223,12 @@ def main():
         except Exception:
             pass
     
-    # Tesseract 路径
-    default_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    tess_path = config.get("tesseract_path", default_path)
-    
-    user_input = input(f"  tesseract.exe 路径（留空用默认）\n    [{tess_path}]\n  > ").strip()
-    if user_input:
-        tess_path = user_input
+    # Tesseract 路径 —— 直接默认，不询问
+    tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     
     if not os.path.exists(tess_path):
-        print(f"  [!] 未找到 tesseract.exe，请确认路径正确")
+        print(f"  [!] 未找到 tesseract.exe")
+        print(f"  请确认已安装 Tesseract-OCR（默认目录：{tess_path}）")
         input("  按回车退出...")
         return
     
@@ -243,7 +263,7 @@ def main():
         ocr_result = pytesseract.image_to_string(test_img, lang='chi_sim+eng')
         cleaned = clean_ocr_text(ocr_result)
         stripped = strip_digits(cleaned)
-        print(f"  识别文字（去数字后）：'{stripped}'")
+        print(f"  识别文字：'{stripped}'")
     except Exception as e:
         print(f"  OCR 测试失败：{e}")
         input("  按回车退出...")
@@ -251,7 +271,7 @@ def main():
     
     # 关键词设置
     keyword = "限时领取"
-    print(f"  触发关键词：'{keyword}'（去数字后匹配）")
+    print(f"  触发关键词：'{keyword}'")
     
     # 保存配置
     config["monitor_box"] = list(monitor_box) if isinstance(monitor_box, tuple) else list(monitor_box)
@@ -276,7 +296,6 @@ def main():
                 time.sleep(0.5)
                 continue
             
-            # 截图 + OCR
             try:
                 img = ImageGrab.grab(bbox=monitor_box)
                 ocr_text = pytesseract.image_to_string(img, lang='chi_sim+eng')
@@ -286,9 +305,7 @@ def main():
                 time.sleep(check_interval)
                 continue
             
-            # 状态判断
             if not stripped:
-                # OCR 没读到文字，跳过
                 time.sleep(check_interval)
                 continue
             
@@ -297,11 +314,9 @@ def main():
                     prev_state = "click"
                     print(f"  >>> [准备点击]")
                 
-                # 随机延迟 3-10 秒
                 delay = random.uniform(3, 10)
                 time.sleep(delay)
                 
-                # 二次确认
                 try:
                     img2 = ImageGrab.grab(bbox=monitor_box)
                     ocr2 = pytesseract.image_to_string(img2, lang='chi_sim+eng')
@@ -309,7 +324,6 @@ def main():
                     stripped2 = strip_digits(cleaned2)
                     
                     if keyword in stripped2:
-                        # 点击
                         if isinstance(monitor_box, tuple) and len(monitor_box) == 4:
                             x1, y1, x2, y2 = monitor_box
                             cx = random.randint(x1, x2)
@@ -326,7 +340,6 @@ def main():
                 except Exception:
                     pass
                 
-                # 重置状态，等待下一轮
                 prev_state = ""
                 
             elif "后领取" in stripped or "即将开始" in stripped:
