@@ -5,39 +5,27 @@ import time
 import random
 import re
 import urllib.request
-import threading
 from datetime import datetime
-from io import BytesIO
 
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-from PIL import Image, ImageGrab, ImageTk, ImageDraw
+from tkinter import messagebox
+from PIL import Image, ImageGrab, ImageTk
 import pyautogui
 
-# ============================================================
-# 全局配置
-# ============================================================
 CONFIG_FILE = "boxbot_config.json"
 NOTICE_URL = "http://res.7ml.cn/ad/notice.txt"
 APP_NAME = "嘉年华箱子助手"
 APP_VERSION = "v6.0"
 BOT_NAME = "BoxBot"
 
-# 全局状态
 running = False
 paused = False
 exit_flag = False
 
-# ============================================================
-# 辅助函数
-# ============================================================
-
 def strip_digits(text):
-    """去掉所有数字和冒号"""
     return re.sub(r'[\d:]', '', text).strip()
 
 def clean_ocr_text(text):
-    """清理 OCR 结果"""
     text = text.replace(' ', '').replace('\n', '').replace('\r', '').strip()
     text = re.sub(r'[^\u4e00-\u9fff\w]', '', text)
     return text
@@ -46,7 +34,6 @@ def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def get_notice():
-    """获取远程公告，失败返回默认"""
     try:
         req = urllib.request.Request(NOTICE_URL, headers={'User-Agent': 'Mozilla/5.0'})
         response = urllib.request.urlopen(req, timeout=5)
@@ -55,31 +42,13 @@ def get_notice():
             return content
     except Exception:
         pass
-    return "框选一次按钮 · 自动识别限时领取 · 循环点击"
-
-def generate_icon():
-    """生成一个简单的宝箱图标"""
-    img = Image.new('RGBA', (256, 256), (0, 255, 120, 180))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([20, 80, 236, 220], radius=30, fill=(139, 69, 19, 240))
-    draw.rectangle([80, 130, 110, 170], fill=(218, 165, 32, 230))
-    draw.rectangle([146, 90, 210, 150], fill=(34, 177, 76, 235))
-    draw.polygon([(206, 86), (214, 74), (222, 82)], fill=(238, 154, 36, 245))
-    return img
-
-# ============================================================
-# 截图选择器（按钮在右侧）
-# ============================================================
+    return "7X24h · 无人值守 · 稳定在线 · 循环点击"
 
 class ScreenshotSelector:
     def __init__(self, title="框选按钮区域"):
         self.root = tk.Tk()
         self.root.title(title)
         self.root.attributes("-topmost", True)
-        
-        icon_img = generate_icon()
-        self.icon_photo = ImageTk.PhotoImage(icon_img.resize((32, 32), Image.LANCZOS))
-        self.root.iconphoto(False, self.icon_photo)
         
         self.result = None
         self.selection_type = None
@@ -98,11 +67,9 @@ class ScreenshotSelector:
         resized_img = self.full_screenshot.resize((display_w, display_h), Image.LANCZOS)
         self.tk_img = ImageTk.PhotoImage(resized_img)
         
-        # 主容器：左右布局
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill="both", expand=True)
         
-        # 左侧：Canvas
         left_frame = tk.Frame(main_frame)
         left_frame.pack(side="left", fill="both", expand=True)
         
@@ -110,12 +77,10 @@ class ScreenshotSelector:
         self.canvas.pack()
         self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
         
-        # 右侧：按钮区（垂直居中）
         right_frame = tk.Frame(main_frame, width=100)
         right_frame.pack(side="right", fill="y", padx=(5, 10))
         right_frame.pack_propagate(False)
         
-        # 垂直居中容器
         center_frame = tk.Frame(right_frame)
         center_frame.place(relx=0.5, rely=0.45, anchor="center")
         
@@ -129,12 +94,10 @@ class ScreenshotSelector:
                                width=8, height=2)
         btn_cancel.pack()
         
-        # 底部状态栏
         self.status_label = tk.Label(self.root, text="请框选按钮区域，然后点击「确认」",
                                      fg="blue", font=("微软雅黑", 10))
         self.status_label.pack(pady=(2, 5))
         
-        # 绑定事件
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_motion)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
@@ -199,22 +162,17 @@ class ScreenshotSelector:
         self.confirmed = False
         self.root.destroy()
 
-# ============================================================
-# 主程序
-# ============================================================
-
 def main():
     global running, paused, exit_flag
     
     notice = get_notice()
     
-    print("=" * 56)
+    print("=" * 60)
     print(f"  {APP_NAME}  {BOT_NAME}  {APP_VERSION}")
     print(f"  {notice}")
-    print("=" * 56)
+    print("=" * 60)
     print()
     
-    # 加载已有配置
     config = {}
     if os.path.exists(CONFIG_FILE):
         try:
@@ -223,7 +181,6 @@ def main():
         except Exception:
             pass
     
-    # Tesseract 路径 —— 直接默认，不询问
     tess_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     
     if not os.path.exists(tess_path):
@@ -235,8 +192,8 @@ def main():
     import pytesseract
     pytesseract.pytesseract.tesseract_cmd = tess_path
     
-    # 5 秒倒计时后截图
     print()
+    print("  注意：截图窗口弹出，请框选按钮区域")
     print("  准备好后按回车，5 秒后弹截图...")
     input("  > ")
     
@@ -245,8 +202,6 @@ def main():
         time.sleep(1)
     print()
     
-    # 截图框选
-    print("  [截图窗口弹出，请框选按钮区域]")
     selector = ScreenshotSelector("框选按钮区域")
     if not selector.confirmed or selector.result is None:
         print("  [取消] 用户取消")
@@ -256,7 +211,6 @@ def main():
     monitor_box = selector.result
     print(f"  监控区域已记录")
     
-    # OCR 测试
     print("  正在测试 OCR 识别...")
     test_img = ImageGrab.grab(bbox=monitor_box)
     try:
@@ -269,11 +223,9 @@ def main():
         input("  按回车退出...")
         return
     
-    # 关键词设置
     keyword = "限时领取"
     print(f"  触发关键词：'{keyword}'")
     
-    # 保存配置
     config["monitor_box"] = list(monitor_box) if isinstance(monitor_box, tuple) else list(monitor_box)
     config["tesseract_path"] = tess_path
     config["keyword"] = keyword
@@ -285,7 +237,6 @@ def main():
     print("  Ctrl+Alt+P = 暂停/恢复 | Ctrl+Alt+Q = 退出")
     print()
     
-    # 循环监控
     running = True
     prev_state = ""
     check_interval = 10
