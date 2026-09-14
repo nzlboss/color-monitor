@@ -18,7 +18,7 @@ import pyautogui
 # 全局配置
 # ============================================================
 CONFIG_FILE = "boxbot_config.json"
-NOTICE_URL = "https://raw.githubusercontent.com/你的用户名/你的仓库/main/notice.txt"  # ← 改成你的链接
+NOTICE_URL = "http://res.7ml.cn/ad/ad-top.txt"  # ← 改成你的链接
 APP_NAME = "嘉年华箱子助手"
 APP_VERSION = "v6.0"
 BOT_NAME = "BoxBot"
