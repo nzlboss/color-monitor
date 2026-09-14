@@ -1,6 +1,5 @@
 pyautogui==0.9.54
 Pillow==10.4.0
 keyboard==0.13.5
-opencv-python-headless==4.10.0.84
+pytesseract==0.3.13
 pyinstaller==6.11.1
-numpy==1.24.3
