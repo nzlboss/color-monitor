@@ -2,48 +2,31 @@ name: Build EXE
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
+    
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Install Python dependencies
+          python-version: '3.12'
+          
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Check Tesseract availability
-        run: |
-          Write-Host "Tesseract 通常由最终用户在本机安装，此处仅做环境提示"
-          Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object Source
-
-      - name: Prepare icon
-        # 优先使用仓库内的 boxbot.ico；没有则用程序运行时自动生成（兼容无图标构建）
-        run: |
-          if (Test-Path "boxbot.ico") {
-            Write-Host "使用仓库内 boxbot.ico"
-          } else {
-            Write-Host "未找到 boxbot.ico，运行时将自动生成简易图标"
-          }
-
+          pip install --upgrade pip
+          pip install pyautogui pillow keyboard pytesseract pyinstaller
+          
       - name: Build EXE
         run: |
-          $icon = ""
-          if (Test-Path "boxbot.ico") { $icon = "--icon boxbot.ico" }
-          pyinstaller --onefile --console --uac-admin --name "嘉年华箱子助手_BoxBot" $icon color_monitor.py
-          dir dist
-
+          pyinstaller --onefile --console --uac-admin --name "嘉年华箱子助手_BoxBot" color_monitor.py
+          
       - name: Upload EXE
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: 嘉年华箱子助手_BoxBot
